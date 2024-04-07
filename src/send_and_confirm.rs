@@ -21,8 +21,8 @@ use crate::Miner;
 
 const RPC_RETRIES: usize = 0;
 const SIMULATION_RETRIES: usize = 4;
-const GATEWAY_RETRIES: usize = 4;
-const CONFIRM_RETRIES: usize = 4;
+const GATEWAY_RETRIES: usize = 3;
+const CONFIRM_RETRIES: usize = 3;
 
 impl Miner {
     pub async fn send_and_confirm(
@@ -36,17 +36,6 @@ impl Miner {
         let client =
             RpcClient::new_with_commitment(self.cluster.clone(), CommitmentConfig::confirmed());
 
-        // Return error if balance is zero
-        let balance = client
-            .get_balance_with_commitment(&signer.pubkey(), CommitmentConfig::confirmed())
-            .await
-            .unwrap();
-        if balance.value <= 0 {
-            return Err(ClientError {
-                request: None,
-                kind: ClientErrorKind::Custom("Insufficient SOL balance".into()),
-            });
-        }
 
         // Build tx
         let (mut hash, mut slot) = client
@@ -134,40 +123,7 @@ impl Miner {
                     if skip_confirm {
                         return Ok(sig);
                     }
-                    for _ in 0..CONFIRM_RETRIES {
-                        std::thread::sleep(Duration::from_millis(2000));
-                        match client.get_signature_statuses(&sigs).await {
-                            Ok(signature_statuses) => {
-                                println!("Confirms: {:?}", signature_statuses.value);
-                                for signature_status in signature_statuses.value {
-                                    if let Some(signature_status) = signature_status.as_ref() {
-                                        if signature_status.confirmation_status.is_some() {
-                                            let current_commitment = signature_status
-                                                .confirmation_status
-                                                .as_ref()
-                                                .unwrap();
-                                            match current_commitment {
-                                                TransactionConfirmationStatus::Processed => {}
-                                                TransactionConfirmationStatus::Confirmed
-                                                | TransactionConfirmationStatus::Finalized => {
-                                                    println!("Transaction landed!");
-                                                    return Ok(sig);
-                                                }
-                                            }
-                                        } else {
-                                            println!("No status");
-                                        }
-                                    }
-                                }
-                            }
 
-                            // Handle confirmation errors
-                            Err(err) => {
-                                println!("Error: {:?}", err);
-                            }
-                        }
-                    }
-                    println!("Transaction did not land");
                 }
 
                 // Handle submit errors
@@ -175,10 +131,8 @@ impl Miner {
                     println!("Error {:?}", err);
                 }
             }
-            stdout.flush().ok();
 
-            // Retry
-            std::thread::sleep(Duration::from_millis(2000));
+
             (hash, slot) = client
                 .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())
                 .await
@@ -193,6 +147,39 @@ impl Miner {
             tx.sign(&[&signer], hash);
             attempts += 1;
             if attempts > GATEWAY_RETRIES {
+                for _ in 0..CONFIRM_RETRIES {
+                    match client.get_signature_statuses(&sigs).await {
+                        Ok(signature_statuses) => {
+                            println!("Confirms: {:?}", signature_statuses.value);
+                            for signature_status in signature_statuses.value {
+                                if let Some(signature_status) = signature_status.as_ref() {
+                                    if signature_status.confirmation_status.is_some() {
+                                        let current_commitment = signature_status
+                                            .confirmation_status
+                                            .as_ref()
+                                            .unwrap();
+                                        match current_commitment {
+                                            TransactionConfirmationStatus::Processed => {}
+                                            TransactionConfirmationStatus::Confirmed
+                                            | TransactionConfirmationStatus::Finalized => {
+                                                println!("Transaction landed!");
+                                                return Ok(sigs[0]);
+                                            }
+                                        }
+                                    } else {
+                                        println!("No status");
+                                    }
+                                }
+                            }
+                        }
+    
+                        // Handle confirmation errors
+                        Err(err) => {
+                            println!("Error: {:?}", err);
+                        }
+                    }
+                }
+                println!("Transaction did not land");
                 return Err(ClientError {
                     request: None,
                     kind: ClientErrorKind::Custom("Max retries".into()),
